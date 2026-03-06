@@ -19,10 +19,13 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Define Data Directory (Use env var or default to current directory)
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+
 // Ensure uploads directory exists
-const uploadDir = path.join(__dirname, 'uploads');
+const uploadDir = path.join(DATA_DIR, 'uploads');
 if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 
 const app = express();
@@ -43,7 +46,9 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // Database Setup
-const db = new Database('vibepass.db');
+const dbPath = path.join(DATA_DIR, 'vibepass.db');
+const db = new Database(dbPath);
+console.log(`Using database at: ${dbPath}`);
 
 // Migrations / Schema Update
 try {
@@ -240,7 +245,7 @@ app.use(cors({
   origin: true,
   credentials: true
 }));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(uploadDir));
 
 // --- Middleware ---
 const authenticate = (req: any, res: any, next: any) => {
