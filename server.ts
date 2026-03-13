@@ -297,23 +297,37 @@ app.post('/api/auth/signup', async (req, res) => {
   if (!email || !password || !name) return res.status(400).json({ error: 'Missing fields' });
 
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    // Check if user already exists
+    const existingUser: any = await db.get('SELECT * FROM users WHERE email = ?', email);
     
-    await db.run('INSERT INTO users (email, password, name, verification_code) VALUES (?, ?, ?, ?)', email, hashedPassword, name, verificationCode);
+    let verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    if (existingUser) {
+      if (existingUser.is_verified === 1) {
+        return res.status(400).json({ error: 'Email already exists and is verified. Please log in.' });
+      } else {
+        // User exists but is not verified. Update their code, name, and password, then resend.
+        const hashedPassword = await bcrypt.hash(password, 10);
+        await db.run('UPDATE users SET verification_code = ?, name = ?, password = ? WHERE email = ?', verificationCode, name, hashedPassword, email);
+      }
+    } else {
+      // New user
+      const hashedPassword = await bcrypt.hash(password, 10);
+      await db.run('INSERT INTO users (email, password, name, verification_code) VALUES (?, ?, ?, ?)', email, hashedPassword, name, verificationCode);
+    }
     
     const success = await sendVerificationEmail(email, name, verificationCode);
     
-    let message = 'Verification code sent to email';
     if (!success) {
-      message = 'Signup successful. Email failed to send (check server logs for code).';
-    } else if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-      message = 'Signup successful, but email service is not configured. Please contact support or use Google login.';
+      // Rollback user creation if email fails to send (only if it was a new user)
+      if (!existingUser) {
+        await db.run('DELETE FROM users WHERE email = ?', email);
+      }
+      return res.status(500).json({ error: 'Failed to send verification email. Please try again or use Google login.' });
     }
     
-    res.json({ message, email });
+    res.json({ message: 'Verification code sent to your email.', email });
   } catch (err: any) {
-    if (err.message && err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Email already exists' });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
