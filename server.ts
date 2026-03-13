@@ -260,7 +260,7 @@ async function runMigrations() {
 
   // Promote admins on startup if they exist
   for (const email of ADMIN_EMAILS) {
-    await db.run('UPDATE users SET is_admin = 1 WHERE email = ?', email);
+    await db.run('UPDATE users SET is_admin = 1 WHERE LOWER(email) = ?', email.toLowerCase());
   }
 
   // Normalize all existing emails to lowercase to fix login issues for older accounts
@@ -316,7 +316,7 @@ app.post('/api/auth/signup', async (req, res) => {
       } else {
         // User exists but is not verified. Update their code, name, and password, then resend.
         const hashedPassword = await bcrypt.hash(password, 10);
-        await db.run('UPDATE users SET verification_code = ?, name = ?, password = ? WHERE email = ?', verificationCode, name, hashedPassword, email);
+        await db.run('UPDATE users SET verification_code = ?, name = ?, password = ? WHERE id = ?', verificationCode, name, hashedPassword, existingUser.id);
       }
     } else {
       // New user
@@ -329,7 +329,7 @@ app.post('/api/auth/signup', async (req, res) => {
     if (!success) {
       // Rollback user creation if email fails to send (only if it was a new user)
       if (!existingUser) {
-        await db.run('DELETE FROM users WHERE email = ?', email);
+        await db.run('DELETE FROM users WHERE LOWER(email) = ?', email);
       }
       return res.status(500).json({ error: 'Failed to send verification email. Please try again or use Google login.' });
     }
