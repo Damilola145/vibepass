@@ -6,7 +6,7 @@ import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import axios from 'axios';
-import nodemailer from 'nodemailer';
+import sgMail from '@sendgrid/mail';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -34,6 +34,10 @@ const app = express();
 app.set('trust proxy', 1);
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const JWT_SECRET = process.env.JWT_SECRET || 'vibe-pass-secret-key';
+if (process.env.SENDGRID_API_KEY) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
+const EMAIL_FROM = process.env.EMAIL_FROM || 'vibepass@example.com';
 
 // Configure Storage (Cloudinary or Local)
 let storage;
@@ -709,131 +713,98 @@ async function sendVerificationEmail(to: string, name: string, code: string): Pr
   console.log(`[DEV MODE] Verification Code for ${to}: ${code}`);
   console.log('==================================================');
 
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    console.warn('EMAIL_USER or EMAIL_PASS not configured. Email not sent.');
+  if (!process.env.SENDGRID_API_KEY) {
+    console.warn('SENDGRID_API_KEY not configured. Email not sent.');
     return false;
   }
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.EMAIL_PORT || '587'),
-    secure: process.env.EMAIL_PORT === '465',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-
-  const mailOptions = {
-    from: `"VibePass" <${process.env.EMAIL_USER}>`,
-    to,
-    subject: 'Verify your VibePass account',
-    html: `
-      <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
-        <h2 style="color: #4f46e5;">Welcome to VibePass, ${name}!</h2>
-        <p>Please use the code below to verify your account:</p>
-        <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #4f46e5;">
-          ${code}
-        </div>
-        <p style="font-size: 12px; color: #6b7280;">If you didn't create an account, you can safely ignore this email.</p>
-      </div>
-    `
-  };
-
   try {
-    await transporter.sendMail(mailOptions);
+    await sgMail.send({
+      from: EMAIL_FROM,
+      to,
+      subject: 'Verify your VibePass account',
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
+          <h2 style="color: #4f46e5;">Welcome to VibePass, ${name}!</h2>
+          <p>Please use the code below to verify your account:</p>
+          <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #4f46e5;">
+            ${code}
+          </div>
+          <p style="font-size: 12px; color: #6b7280;">If you didn't create an account, you can safely ignore this email.</p>
+        </div>
+      `
+    });
+
     console.log(`Verification email sent to ${to}`);
     return true;
-  } catch (err) {
-    console.error('Error sending verification email:', err);
+  } catch (err: any) {
+    console.error('Error sending verification email:', err.response?.body || err);
     return false;
   }
 }
 
 async function sendWelcomeEmail(to: string, name: string): Promise<boolean> {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+  if (!process.env.SENDGRID_API_KEY) {
     return false;
   }
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.EMAIL_PORT || '587'),
-    secure: process.env.EMAIL_PORT === '465',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-
-  const mailOptions = {
-    from: `"VibePass" <${process.env.EMAIL_USER}>`,
-    to,
-    subject: 'Welcome to VibePass!',
-    html: `
-      <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
-        <h2 style="color: #4f46e5;">You're In, ${name}! 🎉</h2>
-        <p>Your email has been successfully verified.</p>
-        <p>You can now explore events, book tickets, and manage your bookings.</p>
-        <div style="margin: 30px 0; text-align: center;">
-          <a href="${process.env.APP_URL || 'http://localhost:3000'}/events" style="background: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">Browse Events</a>
-        </div>
-        <p style="font-size: 12px; color: #6b7280;">Thank you for joining VibePass.</p>
-      </div>
-    `
-  };
-
   try {
-    await transporter.sendMail(mailOptions);
+    await sgMail.send({
+      from: EMAIL_FROM,
+      to,
+      subject: 'Welcome to VibePass!',
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
+          <h2 style="color: #4f46e5;">You're In, ${name}! 🎉</h2>
+          <p>Your email has been successfully verified.</p>
+          <p>You can now explore events, book tickets, and manage your bookings.</p>
+          <div style="margin: 30px 0; text-align: center;">
+            <a href="${process.env.APP_URL || 'http://localhost:3000'}/events" style="background: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">Browse Events</a>
+          </div>
+          <p style="font-size: 12px; color: #6b7280;">Thank you for joining VibePass.</p>
+        </div>
+      `
+    });
+
     console.log(`Welcome email sent to ${to}`);
     return true;
-  } catch (error) {
-    console.error('Error sending welcome email:', error);
+  } catch (err: any) {
+    console.error('Error sending welcome email:', err.response?.body || err);
     return false;
   }
 }
 
 async function sendTicketEmail(to: string, name: string, ticketId: string, qrValue: string) {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    console.error('EMAIL_USER or EMAIL_PASS not configured. Cannot send ticket email.');
+  if (!process.env.SENDGRID_API_KEY) {
+    console.error('SENDGRID_API_KEY not configured. Cannot send ticket email.');
     return;
   }
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.EMAIL_PORT || '587'),
-    secure: process.env.EMAIL_PORT === '465',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-
-  const mailOptions = {
-    from: `"VibePass" <${process.env.EMAIL_USER}>`,
-    to,
-    subject: 'Your VibePass Event Ticket',
-    html: `
-      <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
-        <h2 style="color: #4f46e5;">Hi ${name}, your ticket is ready!</h2>
-        <p>Thank you for booking with VibePass. Here are your ticket details:</p>
-        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 20px 0;">
-          <p><strong>Ticket ID:</strong> ${ticketId}</p>
-          <p><strong>Event:</strong> Your Upcoming Event</p>
-        </div>
-        <p>Show the QR code below at the entrance:</p>
-        <div style="text-align: center; margin: 20px 0;">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(qrValue)}" alt="QR Code" />
-        </div>
-        <p style="font-size: 12px; color: #6b7280;">If you have any questions, reply to this email.</p>
-      </div>
-    `
-  };
-
   try {
-    await transporter.sendMail(mailOptions);
+    await sgMail.send({
+      from: EMAIL_FROM,
+      to,
+      subject: 'Your VibePass Event Ticket',
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
+          <h2 style="color: #4f46e5;">Hi ${name}, your ticket is ready!</h2>
+          <p>Thank you for booking with VibePass. Here are your ticket details:</p>
+          <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Ticket ID:</strong> ${ticketId}</p>
+            <p><strong>Event:</strong> Your Upcoming Event</p>
+          </div>
+          <p>Show the QR code below at the entrance:</p>
+          <div style="text-align: center; margin: 20px 0;">
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(qrValue)}" alt="QR Code" />
+          </div>
+          <p style="font-size: 12px; color: #6b7280;">If you have any questions, reply to this email.</p>
+        </div>
+      `
+    });
+
     console.log(`Ticket email sent to ${to}`);
-  } catch (err) {
-    console.error('Error sending email:', err);
+  } catch (err: any) {
+    console.error('Error sending email:', err.response?.body || err);
   }
 }
 
