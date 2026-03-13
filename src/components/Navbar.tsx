@@ -11,12 +11,12 @@ interface NavbarProps {
 
 const Navbar = ({ user, onSignIn, onLogout }: NavbarProps) => (
   <nav className="fixed top-0 left-0 right-0 z-50 px-6 py-4">
-    <div className="max-w-7xl mx-auto flex items-center justify-between glass rounded-2xl px-6 py-3 shadow-lg">
-      <Link to="/" className="flex items-center gap-2">
-        <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-indigo-200 shadow-lg">
-          <TicketIcon size={24} />
+    <div className="max-w-7xl mx-auto flex items-center justify-between glass rounded-2xl px-4 sm:px-6 py-3 shadow-lg gap-2 sm:gap-4">
+      <Link to="/" className="flex items-center gap-2 shrink-0">
+        <div className="w-8 h-8 sm:w-10 sm:h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-indigo-200 shadow-lg shrink-0">
+          <TicketIcon className="w-5 h-5 sm:w-6 sm:h-6" />
         </div>
-        <span className="text-2xl font-bold font-display tracking-tight text-zinc-900">VibePass</span>
+        <span className="text-xl sm:text-2xl font-bold font-display tracking-tight text-zinc-900">VibePass</span>
       </Link>
       <div className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-600">
         <Link to="/events" className="hover:text-indigo-600 transition-colors">Explore</Link>
@@ -28,17 +28,17 @@ const Navbar = ({ user, onSignIn, onLogout }: NavbarProps) => (
       </div>
       
       {user ? (
-        <div className="flex items-center gap-2 px-2 py-1 bg-zinc-50 rounded-xl border border-zinc-100">
-          <div className="flex items-center gap-2 px-2">
-            <UserIcon size={16} className="text-indigo-600" />
-            <span className="text-sm font-bold text-zinc-700">
+        <div className="flex items-center gap-1 sm:gap-2 px-1 sm:px-2 py-1 bg-zinc-50 rounded-xl border border-zinc-100 shrink min-w-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 px-1 sm:px-2 min-w-0">
+            <UserIcon size={16} className="text-indigo-600 shrink-0" />
+            <span className="text-sm font-bold text-zinc-700 truncate">
               {user.name.split(' ')[0]}
             </span>
           </div>
-          <div className="w-px h-6 bg-zinc-200"></div>
+          <div className="w-px h-6 bg-zinc-200 shrink-0"></div>
           <button 
             onClick={onLogout}
-            className="p-1.5 text-zinc-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
+            className="p-1.5 text-zinc-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all shrink-0"
             title="Log out"
           >
             <LogOut size={18} />
