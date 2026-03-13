@@ -1,7 +1,6 @@
 import express from 'express';
 console.log('Starting server.ts...');
 import { createServer as createViteServer } from 'vite';
-import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
@@ -13,6 +12,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import fs from 'fs';
+import { v2 as cloudinary } from 'cloudinary';
+import { CloudinaryStorage } from 'multer-storage-cloudinary';
+import { getDB } from './db.js';
 
 dotenv.config();
 
@@ -22,222 +24,246 @@ const __dirname = path.dirname(__filename);
 // Define Data Directory (Use env var or default to current directory)
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 
-// Ensure uploads directory exists
+// Ensure uploads directory exists (for local fallback)
 const uploadDir = path.join(DATA_DIR, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
 const app = express();
-const PORT = 3000;
+app.set('trust proxy', 1);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const JWT_SECRET = process.env.JWT_SECRET || 'vibe-pass-secret-key';
 
-// Configure Multer
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure Storage (Cloudinary or Local)
+let storage;
+
+if (process.env.CLOUDINARY_URL) {
+  console.log('Using Cloudinary for storage');
+  cloudinary.config({
+    secure: true
+  });
+  
+  storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+      folder: 'vibepass',
+      allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+    } as any,
+  });
+} else {
+  console.log('Using Local Disk for storage');
+  storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+      cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+  });
+}
 
 const upload = multer({ storage: storage });
 
 // Database Setup
-const dbPath = path.join(DATA_DIR, 'vibepass.db');
-const db = new Database(dbPath);
-console.log(`Using database at: ${dbPath}`);
+const db = getDB();
 
 // Migrations / Schema Update
-try {
-  // Check if table exists first before altering
-  const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").get();
-  
-  if (tableExists) {
-    const userColumns = db.prepare("PRAGMA table_info(users)").all() as any[];
-    const userColumnNames = userColumns.map(c => c.name);
+async function runMigrations() {
+  try {
+    // Check if table exists first before altering
+    const tableExists = await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
     
-    if (!userColumnNames.includes('is_verified')) {
-      db.prepare("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0").run();
+    if (tableExists) {
+      const userColumns = await db.all("PRAGMA table_info(users)");
+      const userColumnNames = userColumns.map(c => c.name);
+      
+      if (!userColumnNames.includes('is_verified')) {
+        await db.run("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0");
+      }
+      if (!userColumnNames.includes('verification_code')) {
+        await db.run("ALTER TABLE users ADD COLUMN verification_code TEXT");
+      }
+      if (!userColumnNames.includes('google_id')) {
+        await db.run("ALTER TABLE users ADD COLUMN google_id TEXT UNIQUE");
+      }
+      if (!userColumnNames.includes('is_admin')) {
+        await db.run("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0");
+      }
     }
-    if (!userColumnNames.includes('verification_code')) {
-      db.prepare("ALTER TABLE users ADD COLUMN verification_code TEXT").run();
+
+    const txTableExists = await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'");
+    if (txTableExists) {
+      const txColumns = await db.all("PRAGMA table_info(transactions)");
+      const txColumnNames = txColumns.map(c => c.name);
+
+      if (!txColumnNames.includes('event_title')) {
+        await db.run("ALTER TABLE transactions ADD COLUMN event_title TEXT");
+      }
+      if (!txColumnNames.includes('event_date')) {
+        await db.run("ALTER TABLE transactions ADD COLUMN event_date TEXT");
+      }
+      if (!txColumnNames.includes('event_location')) {
+        await db.run("ALTER TABLE transactions ADD COLUMN event_location TEXT");
+      }
     }
-    if (!userColumnNames.includes('google_id')) {
-      db.prepare("ALTER TABLE users ADD COLUMN google_id TEXT UNIQUE").run();
-    }
-    if (!userColumnNames.includes('is_admin')) {
-      db.prepare("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0").run();
+  } catch (e) {
+    console.log("Migration check failed:", e);
+  }
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE,
+      password TEXT,
+      name TEXT,
+      is_verified INTEGER DEFAULT 0,
+      verification_code TEXT,
+      google_id TEXT UNIQUE,
+      is_admin INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS events (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      description TEXT,
+      date TEXT,
+      location TEXT,
+      price REAL,
+      category TEXT,
+      image TEXT,
+      organizer TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS tickets (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER,
+      event_id TEXT,
+      event_title TEXT,
+      event_date TEXT,
+      event_location TEXT,
+      qr_value TEXT,
+      purchase_date TEXT,
+      FOREIGN KEY(user_id) REFERENCES users(id),
+      FOREIGN KEY(event_id) REFERENCES events(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS transactions (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER,
+      event_id TEXT,
+      amount REAL,
+      status TEXT, -- pending, completed, failed
+      tx_ref TEXT UNIQUE,
+      created_at TEXT,
+      event_title TEXT,
+      event_date TEXT,
+      event_location TEXT,
+      FOREIGN KEY(user_id) REFERENCES users(id),
+      FOREIGN KEY(event_id) REFERENCES events(id)
+    );
+  `);
+
+  // Cleanup unverified users on startup (after ensuring table exists)
+  try {
+    await db.run('DELETE FROM users WHERE is_verified = 0');
+    console.log('Cleaned up unverified users on startup.');
+  } catch (e) {
+    console.log('Error cleaning up users (table might be empty):', e);
+  }
+
+  // Seed Events
+  const eventsCount = await db.get('SELECT COUNT(*) as count FROM events');
+  if (eventsCount.count === 0) {
+    const MOCK_EVENTS = [
+      {
+        id: '1',
+        title: 'Summer Solstice Jazz Gala',
+        description: 'An elegant evening of smooth jazz under the stars. Featuring world-renowned saxophonists and a gourmet dinner service.',
+        date: '2026-06-21T19:00:00',
+        location: 'Riverside Amphitheater',
+        price: 65,
+        category: 'Music',
+        image: 'https://images.unsplash.com/photo-1511192336575-5a79af67a629?auto=format&fit=crop&q=80&w=1200',
+        organizer: 'Vibe Productions'
+      },
+      {
+        id: '2',
+        title: 'Digital Art Expo 2026',
+        description: 'Explore the intersection of technology and creativity. Featuring VR installations, NFT galleries, and live digital painting.',
+        date: '2026-05-10T10:00:00',
+        location: 'Modern Art Museum',
+        price: 25,
+        category: 'Art',
+        image: 'https://images.unsplash.com/photo-1550684848-fac1c5b4e853?auto=format&fit=crop&q=80&w=1200',
+        organizer: 'Creative Minds Collective'
+      },
+      {
+        id: '3',
+        title: 'Tech Summit: Future AI',
+        description: 'Join industry leaders for a day of talks and workshops on the future of Artificial Intelligence and its impact on society.',
+        date: '2026-06-22T09:00:00',
+        location: 'Innovation Hub',
+        price: 150,
+        category: 'Tech',
+        image: 'https://images.unsplash.com/photo-1540575861501-7cf05a4b125a?auto=format&fit=crop&q=80&w=1200',
+        organizer: 'TechForward'
+      },
+      {
+        id: '4',
+        title: 'Gourmet Street Food Tour',
+        description: 'Taste the best street food the city has to offer. From spicy tacos to artisanal desserts, there\'s something for everyone.',
+        date: '2026-04-20T12:00:00',
+        location: 'Central Park Plaza',
+        price: 15,
+        category: 'Food',
+        image: 'https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&q=80&w=1200',
+        organizer: 'City Eats'
+      },
+      {
+        id: '5',
+        title: 'Championship Finals: Basketball',
+        description: 'The final game of the season. Witness the intensity as the top two teams battle it out for the trophy.',
+        date: '2026-05-05T19:30:00',
+        location: 'Victory Stadium',
+        price: 80,
+        category: 'Sports',
+        image: 'https://images.unsplash.com/photo-1504450758481-7338eba7524a?auto=format&fit=crop&q=80&w=1200',
+        organizer: 'Pro League'
+      },
+      {
+        id: '6',
+        title: 'Startup Pitch Night',
+        description: 'Watch the next generation of entrepreneurs pitch their ideas to a panel of expert investors.',
+        date: '2026-04-30T18:00:00',
+        location: 'The Loft Coworking',
+        price: 10,
+        category: 'Business',
+        image: 'https://images.unsplash.com/photo-1475721027785-f74eccf877e2?auto=format&fit=crop&q=80&w=1200',
+        organizer: 'Venture Hub'
+      }
+    ];
+
+    for (const event of MOCK_EVENTS) {
+      await db.run('INSERT INTO events (id, title, description, date, location, price, category, image, organizer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+        event.id, event.title, event.description, event.date, event.location, event.price, event.category, event.image, event.organizer);
     }
   }
 
-  const txTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'").get();
-  if (txTableExists) {
-    const txColumns = db.prepare("PRAGMA table_info(transactions)").all() as any[];
-    const txColumnNames = txColumns.map(c => c.name);
+  // --- Admin Setup ---
+  const ADMIN_EMAILS = ['damilolaolonitola807@gmail.com'];
 
-    if (!txColumnNames.includes('event_title')) {
-      db.prepare("ALTER TABLE transactions ADD COLUMN event_title TEXT").run();
-    }
-    if (!txColumnNames.includes('event_date')) {
-      db.prepare("ALTER TABLE transactions ADD COLUMN event_date TEXT").run();
-    }
-    if (!txColumnNames.includes('event_location')) {
-      db.prepare("ALTER TABLE transactions ADD COLUMN event_location TEXT").run();
-    }
+  // Promote admins on startup if they exist
+  for (const email of ADMIN_EMAILS) {
+    await db.run('UPDATE users SET is_admin = 1 WHERE email = ?', email);
   }
-} catch (e) {
-  console.log("Migration check failed:", e);
 }
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE,
-    password TEXT,
-    name TEXT,
-    is_verified INTEGER DEFAULT 0,
-    verification_code TEXT,
-    google_id TEXT UNIQUE,
-    is_admin INTEGER DEFAULT 0
-  );
+// Run migrations on start
+runMigrations();
 
-  CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    description TEXT,
-    date TEXT,
-    location TEXT,
-    price REAL,
-    category TEXT,
-    image TEXT,
-    organizer TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS tickets (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER,
-    event_id TEXT,
-    event_title TEXT,
-    event_date TEXT,
-    event_location TEXT,
-    qr_value TEXT,
-    purchase_date TEXT,
-    FOREIGN KEY(user_id) REFERENCES users(id),
-    FOREIGN KEY(event_id) REFERENCES events(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS transactions (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER,
-    event_id TEXT,
-    amount REAL,
-    status TEXT, -- pending, completed, failed
-    tx_ref TEXT UNIQUE,
-    created_at TEXT,
-    event_title TEXT,
-    event_date TEXT,
-    event_location TEXT,
-    FOREIGN KEY(user_id) REFERENCES users(id),
-    FOREIGN KEY(event_id) REFERENCES events(id)
-  );
-`);
-
-// Cleanup unverified users on startup (after ensuring table exists)
-try {
-  db.prepare('DELETE FROM users WHERE is_verified = 0').run();
-  console.log('Cleaned up unverified users on startup.');
-} catch (e) {
-  console.log('Error cleaning up users (table might be empty):', e);
-}
-
-// Seed Events
-const eventsCount = db.prepare('SELECT COUNT(*) as count FROM events').get() as any;
-if (eventsCount.count === 0) {
-  const MOCK_EVENTS = [
-    {
-      id: '1',
-      title: 'Summer Solstice Jazz Gala',
-      description: 'An elegant evening of smooth jazz under the stars. Featuring world-renowned saxophonists and a gourmet dinner service.',
-      date: '2026-06-21T19:00:00',
-      location: 'Riverside Amphitheater',
-      price: 65,
-      category: 'Music',
-      image: 'https://images.unsplash.com/photo-1511192336575-5a79af67a629?auto=format&fit=crop&q=80&w=1200',
-      organizer: 'Vibe Productions'
-    },
-    {
-      id: '2',
-      title: 'Digital Art Expo 2026',
-      description: 'Explore the intersection of technology and creativity. Featuring VR installations, NFT galleries, and live digital painting.',
-      date: '2026-05-10T10:00:00',
-      location: 'Modern Art Museum',
-      price: 25,
-      category: 'Art',
-      image: 'https://images.unsplash.com/photo-1550684848-fac1c5b4e853?auto=format&fit=crop&q=80&w=1200',
-      organizer: 'Creative Minds Collective'
-    },
-    {
-      id: '3',
-      title: 'Tech Summit: Future AI',
-      description: 'Join industry leaders for a day of talks and workshops on the future of Artificial Intelligence and its impact on society.',
-      date: '2026-06-22T09:00:00',
-      location: 'Innovation Hub',
-      price: 150,
-      category: 'Tech',
-      image: 'https://images.unsplash.com/photo-1540575861501-7cf05a4b125a?auto=format&fit=crop&q=80&w=1200',
-      organizer: 'TechForward'
-    },
-    {
-      id: '4',
-      title: 'Gourmet Street Food Tour',
-      description: 'Taste the best street food the city has to offer. From spicy tacos to artisanal desserts, there\'s something for everyone.',
-      date: '2026-04-20T12:00:00',
-      location: 'Central Park Plaza',
-      price: 15,
-      category: 'Food',
-      image: 'https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&q=80&w=1200',
-      organizer: 'City Eats'
-    },
-    {
-      id: '5',
-      title: 'Championship Finals: Basketball',
-      description: 'The final game of the season. Witness the intensity as the top two teams battle it out for the trophy.',
-      date: '2026-05-05T19:30:00',
-      location: 'Victory Stadium',
-      price: 80,
-      category: 'Sports',
-      image: 'https://images.unsplash.com/photo-1504450758481-7338eba7524a?auto=format&fit=crop&q=80&w=1200',
-      organizer: 'Pro League'
-    },
-    {
-      id: '6',
-      title: 'Startup Pitch Night',
-      description: 'Watch the next generation of entrepreneurs pitch their ideas to a panel of expert investors.',
-      date: '2026-04-30T18:00:00',
-      location: 'The Loft Coworking',
-      price: 10,
-      category: 'Business',
-      image: 'https://images.unsplash.com/photo-1475721027785-f74eccf877e2?auto=format&fit=crop&q=80&w=1200',
-      organizer: 'Venture Hub'
-    }
-  ];
-
-  const stmt = db.prepare('INSERT INTO events (id, title, description, date, location, price, category, image, organizer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-  MOCK_EVENTS.forEach(event => {
-    stmt.run(event.id, event.title, event.description, event.date, event.location, event.price, event.category, event.image, event.organizer);
-  });
-}
-
-// --- Admin Setup ---
 const ADMIN_EMAILS = ['damilolaolonitola807@gmail.com'];
-
-// Promote admins on startup if they exist
-ADMIN_EMAILS.forEach(email => {
-  db.prepare('UPDATE users SET is_admin = 1 WHERE email = ?').run(email);
-});
 
 app.use(express.json());
 app.use(cookieParser());
@@ -270,8 +296,7 @@ app.post('/api/auth/signup', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     
-    const stmt = db.prepare('INSERT INTO users (email, password, name, verification_code) VALUES (?, ?, ?, ?)');
-    const result = stmt.run(email, hashedPassword, name, verificationCode);
+    await db.run('INSERT INTO users (email, password, name, verification_code) VALUES (?, ?, ?, ?)', email, hashedPassword, name, verificationCode);
     
     const success = await sendVerificationEmail(email, name, verificationCode);
     
@@ -284,20 +309,20 @@ app.post('/api/auth/signup', async (req, res) => {
     
     res.json({ message, email });
   } catch (err: any) {
-    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Email already exists' });
+    if (err.message && err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Email already exists' });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.post('/api/auth/verify', async (req, res) => {
   const { email, code } = req.body;
-  const user: any = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
 
   if (!user || user.verification_code !== code) {
     return res.status(400).json({ error: 'Invalid verification code' });
   }
 
-  db.prepare('UPDATE users SET is_verified = 1, verification_code = NULL WHERE id = ?').run(user.id);
+  await db.run('UPDATE users SET is_verified = 1, verification_code = NULL WHERE id = ?', user.id);
   
   // Send welcome email
   await sendWelcomeEmail(user.email, user.name);
@@ -311,12 +336,12 @@ app.post('/api/auth/resend', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
 
-  const user: any = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (user.is_verified) return res.status(400).json({ error: 'User already verified' });
 
   const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-  db.prepare('UPDATE users SET verification_code = ? WHERE id = ?').run(verificationCode, user.id);
+  await db.run('UPDATE users SET verification_code = ? WHERE id = ?', verificationCode, user.id);
 
   try {
     await sendVerificationEmail(email, user.name, verificationCode);
@@ -328,7 +353,7 @@ app.post('/api/auth/resend', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
-  const user: any = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
 
   if (!user || !user.password || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ error: 'Invalid credentials' });
@@ -340,7 +365,7 @@ app.post('/api/auth/login', async (req, res) => {
 
   // Force admin status if in ADMIN_EMAILS
   if (ADMIN_EMAILS.includes(user.email)) {
-    db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(user.id);
+    await db.run('UPDATE users SET is_admin = 1 WHERE id = ?', user.id);
     user.is_admin = 1;
   }
 
@@ -352,8 +377,9 @@ app.post('/api/auth/login', async (req, res) => {
 // --- Google OAuth ---
 app.get('/api/auth/google/url', (req, res) => {
   const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
-  // Use APP_URL if available, otherwise fallback to request host
-  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  // Use APP_URL if available, otherwise fallback to request host with correct protocol
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const appUrl = process.env.APP_URL || `${protocol}://${req.get('host')}`;
   const redirectUri = `${appUrl.replace(/\/$/, '')}/api/auth/google/callback`;
   
   console.log('Generating Google Auth URL with redirect_uri:', redirectUri);
@@ -379,7 +405,8 @@ app.get('/api/auth/google/url', (req, res) => {
 
 app.get('/api/auth/google/callback', async (req, res) => {
   const { code } = req.query;
-  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const appUrl = process.env.APP_URL || `${protocol}://${req.get('host')}`;
   const redirectUri = `${appUrl.replace(/\/$/, '')}/api/auth/google/callback`;
 
   try {
@@ -400,19 +427,18 @@ app.get('/api/auth/google/callback', async (req, res) => {
       headers: { Authorization: `Bearer ${access_token}` },
     });
 
-    let user: any = db.prepare('SELECT * FROM users WHERE email = ? OR google_id = ?').get(googleUser.email, googleUser.id);
+    let user: any = await db.get('SELECT * FROM users WHERE email = ? OR google_id = ?', googleUser.email, googleUser.id);
 
     if (!user) {
-      const stmt = db.prepare('INSERT INTO users (email, name, google_id, is_verified) VALUES (?, ?, ?, 1)');
-      const result = stmt.run(googleUser.email, googleUser.name, googleUser.id);
+      const result = await db.run('INSERT INTO users (email, name, google_id, is_verified) VALUES (?, ?, ?, 1)', googleUser.email, googleUser.name, googleUser.id);
       user = { id: result.lastInsertRowid, email: googleUser.email, name: googleUser.name, is_admin: 0 };
     } else if (!user.google_id) {
-      db.prepare('UPDATE users SET google_id = ?, is_verified = 1 WHERE id = ?').run(googleUser.id, user.id);
+      await db.run('UPDATE users SET google_id = ?, is_verified = 1 WHERE id = ?', googleUser.id, user.id);
     }
 
     // Force admin status if in ADMIN_EMAILS
     if (ADMIN_EMAILS.includes(user.email)) {
-      db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(user.id);
+      await db.run('UPDATE users SET is_admin = 1 WHERE id = ?', user.id);
       user.is_admin = 1;
     }
 
@@ -450,8 +476,8 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', authenticate, (req: any, res) => {
-  const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+app.get('/api/auth/me', authenticate, async (req: any, res) => {
+  const user: any = await db.get('SELECT * FROM users WHERE id = ?', req.user.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   
   res.json({ 
@@ -470,18 +496,18 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // --- Event Routes ---
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
   try {
-    const events = db.prepare('SELECT * FROM events').all();
+    const events = await db.all('SELECT * FROM events');
     res.json({ events });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch events' });
   }
 });
 
-app.post('/api/events', authenticate, upload.single('image'), (req: any, res) => {
+app.post('/api/events', authenticate, upload.single('image'), async (req: any, res) => {
   // Fetch fresh user to check admin status
-  const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const user: any = await db.get('SELECT * FROM users WHERE id = ?', req.user.id);
   
   if (!user || user.is_admin !== 1) {
     return res.status(403).json({ error: 'Admin access required' });
@@ -491,10 +517,13 @@ app.post('/api/events', authenticate, upload.single('image'), (req: any, res) =>
   let image = req.body.image; // Could be a URL string if no file uploaded
 
   if (req.file) {
-    // If file uploaded, use the file path (relative to server root, served via /uploads)
-    // We need to construct the full URL or relative path that the client can access
-    // Since we serve /uploads static route, the path is /uploads/filename
-    image = `${process.env.APP_URL || 'http://localhost:3000'}/uploads/${req.file.filename}`;
+    // If file uploaded, use the path provided by Multer (Cloudinary or Local)
+    if (req.file.path) {
+      image = req.file.path; // Cloudinary returns full URL in .path
+    } else {
+      // Local fallback
+      image = `${process.env.APP_URL || 'http://localhost:3000'}/uploads/${req.file.filename}`;
+    }
   }
 
   if (!image) {
@@ -504,8 +533,8 @@ app.post('/api/events', authenticate, upload.single('image'), (req: any, res) =>
   const id = Math.random().toString(36).substr(2, 9);
 
   try {
-    db.prepare('INSERT INTO events (id, title, description, date, location, price, category, image, organizer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, title, description, date, location, price, category, image, organizer);
+    await db.run('INSERT INTO events (id, title, description, date, location, price, category, image, organizer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      id, title, description, date, location, price, category, image, organizer);
     res.json({ success: true, event: { id, title, description, date, location, price, category, image, organizer } });
   } catch (err) {
     console.error(err);
@@ -514,9 +543,9 @@ app.post('/api/events', authenticate, upload.single('image'), (req: any, res) =>
 });
 
 // --- Ticket Routes ---
-app.get('/api/tickets', authenticate, (req: any, res) => {
+app.get('/api/tickets', authenticate, async (req: any, res) => {
   try {
-    const tickets = db.prepare('SELECT * FROM tickets WHERE user_id = ? ORDER BY purchase_date DESC').all(req.user.id);
+    const tickets = await db.all('SELECT * FROM tickets WHERE user_id = ? ORDER BY purchase_date DESC', req.user.id);
     
     const formattedTickets = tickets.map((t: any) => ({
       id: t.id,
@@ -575,8 +604,8 @@ app.post('/api/payments/initialize', authenticate, async (req: any, res) => {
     }
 
     // Save pending transaction
-    db.prepare('INSERT INTO transactions (id, user_id, event_id, amount, status, tx_ref, created_at, event_title, event_date, event_location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(tx_ref, req.user.id, eventId, amount, 'pending', tx_ref, new Date().toISOString(), eventTitle, eventDate, eventLocation);
+    await db.run('INSERT INTO transactions (id, user_id, event_id, amount, status, tx_ref, created_at, event_title, event_date, event_location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      tx_ref, req.user.id, eventId, amount, 'pending', tx_ref, new Date().toISOString(), eventTitle, eventDate, eventLocation);
 
     res.json({ link });
   } catch (err: any) {
@@ -589,7 +618,7 @@ app.get('/api/payments/callback', async (req, res) => {
   const { status, tx_ref, transaction_id } = req.query;
 
   if (status === 'successful' || status === 'completed') {
-    const transaction: any = db.prepare('SELECT * FROM transactions WHERE tx_ref = ?').get(tx_ref);
+    const transaction: any = await db.get('SELECT * FROM transactions WHERE tx_ref = ?', tx_ref);
     
     if (transaction && transaction.status === 'pending') {
       // Verify transaction with Flutterwave if key exists
@@ -614,18 +643,18 @@ app.get('/api/payments/callback', async (req, res) => {
       }
 
       // Update transaction status
-      db.prepare('UPDATE transactions SET status = ? WHERE tx_ref = ?').run('completed', tx_ref);
+      await db.run('UPDATE transactions SET status = ? WHERE tx_ref = ?', 'completed', tx_ref);
 
       // Generate Ticket
       const ticketId = `TKT-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-      const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(transaction.user_id);
+      const user: any = await db.get('SELECT * FROM users WHERE id = ?', transaction.user_id);
       
       const qrValue = `VIBEPASS-${ticketId}-${user.email}`;
       
-      db.prepare(`
+      await db.run(`
         INSERT INTO tickets (id, user_id, event_id, event_title, event_date, event_location, qr_value, purchase_date)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      `, 
         ticketId, 
         transaction.user_id, 
         transaction.event_id, 
