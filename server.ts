@@ -262,6 +262,13 @@ async function runMigrations() {
   for (const email of ADMIN_EMAILS) {
     await db.run('UPDATE users SET is_admin = 1 WHERE email = ?', email);
   }
+
+  // Normalize all existing emails to lowercase to fix login issues for older accounts
+  try {
+    await db.run('UPDATE users SET email = LOWER(email)');
+  } catch (err) {
+    console.error('Error normalizing emails:', err);
+  }
 }
 
 // Run migrations on start
@@ -299,7 +306,7 @@ app.post('/api/auth/signup', async (req, res) => {
 
   try {
     // Check if user already exists
-    const existingUser: any = await db.get('SELECT * FROM users WHERE email = ?', email);
+    const existingUser: any = await db.get('SELECT * FROM users WHERE LOWER(email) = ?', email);
     
     let verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     
@@ -336,7 +343,7 @@ app.post('/api/auth/signup', async (req, res) => {
 app.post('/api/auth/verify', async (req, res) => {
   let { email, code } = req.body;
   email = email?.toLowerCase().trim();
-  const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
+  const user: any = await db.get('SELECT * FROM users WHERE LOWER(email) = ?', email);
 
   console.log(`[VERIFY] Attempting to verify user: ${email}`);
   console.log(`[VERIFY] Code provided: '${code}', Code in DB: '${user?.verification_code}'`);
@@ -360,7 +367,7 @@ app.post('/api/auth/resend', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'Email is required' });
   email = email.toLowerCase().trim();
 
-  const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
+  const user: any = await db.get('SELECT * FROM users WHERE LOWER(email) = ?', email);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (user.is_verified) return res.status(400).json({ error: 'User already verified' });
 
@@ -378,7 +385,7 @@ app.post('/api/auth/resend', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   let { email, password } = req.body;
   email = email?.toLowerCase().trim();
-  const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
+  const user: any = await db.get('SELECT * FROM users WHERE LOWER(email) = ?', email);
 
   if (!user || !user.password || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ error: 'Invalid credentials' });
@@ -452,7 +459,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       headers: { Authorization: `Bearer ${access_token}` },
     });
 
-    let user: any = await db.get('SELECT * FROM users WHERE email = ? OR google_id = ?', googleUser.email, googleUser.id);
+    let user: any = await db.get('SELECT * FROM users WHERE LOWER(email) = ? OR google_id = ?', googleUser.email.toLowerCase(), googleUser.id);
 
     if (!user) {
       const result = await db.run('INSERT INTO users (email, name, google_id, is_verified) VALUES (?, ?, ?, 1)', googleUser.email, googleUser.name, googleUser.id);
