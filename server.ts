@@ -293,8 +293,9 @@ const authenticate = (req: any, res: any, next: any) => {
 
 // --- Auth Routes ---
 app.post('/api/auth/signup', async (req, res) => {
-  const { email, password, name } = req.body;
+  let { email, password, name } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: 'Missing fields' });
+  email = email.toLowerCase().trim();
 
   try {
     // Check if user already exists
@@ -333,10 +334,14 @@ app.post('/api/auth/signup', async (req, res) => {
 });
 
 app.post('/api/auth/verify', async (req, res) => {
-  const { email, code } = req.body;
+  let { email, code } = req.body;
+  email = email?.toLowerCase().trim();
   const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
 
-  if (!user || user.verification_code !== code) {
+  console.log(`[VERIFY] Attempting to verify user: ${email}`);
+  console.log(`[VERIFY] Code provided: '${code}', Code in DB: '${user?.verification_code}'`);
+
+  if (!user || String(user.verification_code).trim() !== String(code).trim()) {
     return res.status(400).json({ error: 'Invalid verification code' });
   }
 
@@ -351,8 +356,9 @@ app.post('/api/auth/verify', async (req, res) => {
 });
 
 app.post('/api/auth/resend', async (req, res) => {
-  const { email } = req.body;
+  let { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
+  email = email.toLowerCase().trim();
 
   const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
   if (!user) return res.status(404).json({ error: 'User not found' });
@@ -370,7 +376,8 @@ app.post('/api/auth/resend', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
+  let { email, password } = req.body;
+  email = email?.toLowerCase().trim();
   const user: any = await db.get('SELECT * FROM users WHERE email = ?', email);
 
   if (!user || !user.password || !(await bcrypt.compare(password, user.password))) {
